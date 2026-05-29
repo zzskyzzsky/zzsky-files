@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zzsky 文件站 - 登录</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="login-container">
+    <h1>🔐 zzsky 文件站</h1>
+    <p class="subtitle">请输入密码访问</p>
+    <form id="loginForm">
+      <input type="password" id="password" placeholder="请输入密码" autofocus>
+      <button type="submit">登录</button>
+    </form>
+    <p id="error" class="error" style="display:none"></p>
+  </div>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pw = document.getElementById('password').value;
+      const err = document.getElementById('error');
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: pw})
+        });
+        const data = await res.json();
+        if (data.success) {
+          window.location.href = data.redirect;
+        } else {
+          err.textContent = data.message;
+          err.style.display = 'block';
+        }
+      } catch(e) {
+        err.textContent = '请求失败，请重试';
+        err.style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>
