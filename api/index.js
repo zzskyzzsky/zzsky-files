@@ -171,4 +171,10 @@ function generateListingPage(files) {
     '\n<p class="footer">文件通过 Git 推送自动更新 · 密码保护</p>\n</div>\n</body>\n</html>';
 }
 
+// Start server when run directly (not as Vercel module)
+var PORT = process.env.PORT || 3000;
+app.listen(PORT, function() {
+  console.log('zzsky-files running on port ' + PORT);
+});
+
 module.exports = app;
