@@ -1,5 +1,5 @@
 const express = require('express');
-const session = require('express-session');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -7,93 +7,110 @@ const app = express();
 
 // ==================== Config ====================
 const PASSWORD = process.env.VERCEL_PASSWORD || 'changeme';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'zzsky-files-secret-2026';
 const FILES_DIR = path.resolve(__dirname, '..', 'files');
-
-// Ensure files directory exists
-if (!fs.existsSync(FILES_DIR)) {
-  fs.mkdirSync(FILES_DIR, { recursive: true });
-}
 
 // ==================== Middleware ====================
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(session({
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: true,
-  cookie: {
-    secure: !!process.env.VERCEL,
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  }
-}));
 
-// Static files (login page, CSS)
+// Static files
 app.use('/static', express.static(path.resolve(__dirname, '..', 'public')));
 
-// Auth middleware
-function requireAuth(req, res, next) {
-  if (req.session && req.session.authenticated) {
-    return next();
-  }
-  if (req.path === '/login' || req.path.startsWith('/static/') || req.path === '/api/login') {
-    return next();
-  }
-  if (req.method === 'POST' && req.path === '/api/login') {
-    return next();
-  }
-  res.redirect('/login');
+// Simple cookie-based auth (no session store needed)
+const COOKIE_SECRET = process.env.COOKIE_SECRET || process.env.SESSION_SECRET || 'zzsky-secret-2026';
+
+function parseCookies(req) {
+  const c = req.headers.cookie;
+  if (!c) return {};
+  return c.split(';').reduce(function(o, kv) {
+    var parts = kv.trim().split('=');
+    o[parts[0]] = decodeURIComponent(parts[1] || '');
+    return o;
+  }, {});
 }
 
-app.use(requireAuth);
+function makeToken() {
+  var h = crypto.createHmac('sha256', COOKIE_SECRET);
+  h.update('auth:' + PASSWORD);
+  return h.digest('hex');
+}
+
+function setAuthCookie(res) {
+  var maxAge = 7 * 24 * 60 * 60;
+  var secure = process.env.VERCEL ? '; Secure' : '';
+  res.setHeader('Set-Cookie', 'auth=' + makeToken() + '; HttpOnly; Path=/; Max-Age=' + maxAge + '; SameSite=Lax' + secure);
+}
+
+function checkAuth(req) {
+  var cookies = parseCookies(req);
+  var token = cookies.auth;
+  if (!token) return false;
+  var expected = makeToken();
+  if (token.length !== expected.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+  } catch(e) {
+    return false;
+  }
+}
+
+// Auth middleware
+app.use(function(req, res, next) {
+  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/logout' ||
+      req.path.startsWith('/static/')) {
+    return next();
+  }
+  if (checkAuth(req)) {
+    return next();
+  }
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  res.redirect('/login');
+});
 
 // ==================== Routes ====================
 
 // Login page
-app.get('/login', (req, res) => {
-  if (req.session && req.session.authenticated) {
+app.get('/login', function(req, res) {
+  if (checkAuth(req)) {
     return res.redirect('/');
   }
   res.sendFile(path.resolve(__dirname, '..', 'public', 'login.html'));
 });
 
 // Login POST
-app.post('/api/login', (req, res) => {
-  const { password } = req.body;
-  if (password === PASSWORD) {
-    req.session.authenticated = true;
+app.post('/api/login', function(req, res) {
+  if (req.body && req.body.password === PASSWORD) {
+    setAuthCookie(res);
     return res.json({ success: true, redirect: '/' });
   }
   res.json({ success: false, message: '密码错误' });
 });
 
 // Logout
-app.get('/api/logout', (req, res) => {
-  req.session.destroy();
+app.get('/api/logout', function(req, res) {
+  res.setHeader('Set-Cookie', 'auth=; HttpOnly; Path=/; Max-Age=0');
   res.redirect('/login');
 });
 
 // API: list files (JSON)
-app.get('/api/files', (req, res) => {
-  const files = listFiles();
-  res.json({ files });
+app.get('/api/files', function(req, res) {
+  res.json({ files: listFiles() });
 });
 
 // Home page
-app.get('/', (req, res) => {
-  const files = listFiles();
-  res.send(generateListingPage(files));
+app.get('/', function(req, res) {
+  res.send(generateListingPage(listFiles()));
 });
 
 // Serve file
-app.get('/files/:name', (req, res) => {
-  const fileName = path.basename(req.params.name);
-  const filePath = path.join(FILES_DIR, fileName);
-
+app.get('/files/:name', function(req, res) {
+  var fileName = path.basename(req.params.name);
+  var filePath = path.join(FILES_DIR, fileName);
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('文件不存在');
   }
-
   if (fileName.endsWith('.html') || fileName.endsWith('.htm')) {
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.send(fs.readFileSync(filePath, 'utf-8'));
@@ -105,25 +122,21 @@ app.get('/files/:name', (req, res) => {
 // ==================== Helpers ====================
 
 function listFiles() {
-  let files = [];
+  if (!fs.existsSync(FILES_DIR)) return [];
   try {
-    const items = fs.readdirSync(FILES_DIR, { withFileTypes: true });
-    files = items
-      .filter(item => item.isFile())
-      .map(item => {
-        const stat = fs.statSync(path.join(FILES_DIR, item.name));
-        return {
-          name: item.name,
-          size: formatSize(stat.size),
-          mtime: stat.mtime.toISOString().replace('T', ' ').slice(0, 16),
-          isHtml: item.name.endsWith('.html') || item.name.endsWith('.htm')
-        };
-      })
-      .sort((a, b) => b.mtime.localeCompare(a.mtime));
-  } catch (e) {
-    // files dir might not exist
+    var items = fs.readdirSync(FILES_DIR, { withFileTypes: true });
+    return items.filter(function(item) { return item.isFile(); }).map(function(item) {
+      var stat = fs.statSync(path.join(FILES_DIR, item.name));
+      return {
+        name: item.name,
+        size: formatSize(stat.size),
+        mtime: stat.mtime.toISOString().replace('T', ' ').slice(0, 16),
+        isHtml: item.name.endsWith('.html') || item.name.endsWith('.htm')
+      };
+    }).sort(function(a, b) { return b.mtime.localeCompare(a.mtime); });
+  } catch(e) {
+    return [];
   }
-  return files;
 }
 
 function formatSize(bytes) {
@@ -132,53 +145,30 @@ function formatSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + 'MB';
 }
 
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 function generateListingPage(files) {
-  const fileRows = files.map(f => {
-    const viewLink = f.isHtml
-      ? ` <a href="/files/${f.name}" class="view-link">📖 查看</a>`
-      : '';
-    return `<tr>
-      <td class="fname">📄 ${f.name}</td>
-      <td class="fsize">${f.size}</td>
-      <td class="ftime">${f.mtime}</td>
-      <td class="faction">
-        <a href="/files/${f.name}" class="dl-link">⬇ 下载</a>${viewLink}
-      </td>
-    </tr>`;
+  var rows = files.map(function(f) {
+    var viewLink = f.isHtml ? ' <a href="/files/' + escHtml(f.name) + '" class="view-link">📖 查看</a>' : '';
+    return '<tr>' +
+      '<td class="fname">📄 ' + escHtml(f.name) + '</td>' +
+      '<td class="fsize">' + f.size + '</td>' +
+      '<td class="ftime">' + f.mtime + '</td>' +
+      '<td class="faction"><a href="/files/' + escHtml(f.name) + '" class="dl-link">⬇ 下载</a>' + viewLink + '</td>' +
+      '</tr>';
   }).join('\n');
 
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>zzsky 文件站</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>📂 zzsky 文件站</h1>
-      <a href="/api/logout" class="logout">退出</a>
-    </div>
-    ${files.length === 0
+  return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n' +
+    '<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+    '<title>zzsky 文件站</title>\n<link rel="stylesheet" href="/static/style.css">\n</head>\n<body>\n' +
+    '<div class="container">\n<div class="header">\n<h1>📂 zzsky 文件站</h1>\n' +
+    '<a href="/api/logout" class="logout">退出</a>\n</div>\n' +
+    (files.length === 0
       ? '<p class="empty">暂无文件</p>'
-      : `<table>
-        <thead>
-          <tr>
-            <th>文件名</th>
-            <th>大小</th>
-            <th>更新时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>${fileRows}</tbody>
-      </table>`
-    }
-    <p class="footer">文件通过 Git 推送自动更新 · 密码保护</p>
-  </div>
-</body>
-</html>`;
+      : '<table><thead><tr><th>文件名</th><th>大小</th><th>更新时间</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>') +
+    '\n<p class="footer">文件通过 Git 推送自动更新 · 密码保护</p>\n</div>\n</body>\n</html>';
 }
 
 module.exports = app;
