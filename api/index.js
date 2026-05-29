@@ -6,7 +6,7 @@ const fs = require('fs');
 const app = express();
 
 // ==================== Config ====================
-const PASSWORD = process.env.VERCEL_PASSWORD || 'changeme';
+var PASSWORD = (process.env.VERCEL_PASSWORD || 'changeme');
 const FILES_DIR = path.resolve(__dirname, '..', 'files');
 
 // ==================== Middleware ====================
